@@ -1,12 +1,127 @@
-- 👋 Hi, I’m @prithakarmakar
-- 👀 I’m interested in ...
-- 🌱 I’m currently learning ...
-- 💞️ I’m looking to collaborate on ...
-- 📫 How to reach me ...
-- 😄 Pronouns: ...
-- ⚡ Fun fact: ...
+import os
+import numpy as np
+import librosa
+import logging
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score, ConfusionMatrixDisplay
+from sklearn.pipeline import make_pipeline
+from imblearn.over_sampling import SMOTE
+import matplotlib.pyplot as plt
 
-<!---
-prithakarmakar/prithakarmakar is a ✨ special ✨ repository because its `README.md` (this file) appears on your GitHub profile.
-You can click the Preview link to take a look at your changes.
---->
+# Setup logging
+logging.basicConfig(filename='processing_errors.log', level=logging.ERROR)
+
+# Paths
+dataset_path = os.path.normpath(r'C:/Users/ARUNIMA PATRA/OneDrive/Desktop/archive/donateacry_corpus')  # Update this path
+
+# Define categories
+categories = ['belly_pain', 'burping', 'discomfort', 'hungry', 'tired']
+
+# Feature extraction function
+def extract_features(file_path):
+    y, sr = librosa.load(file_path, sr=None)
+    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    chroma = librosa.feature.chroma_stft(y=y, sr=sr, n_chroma=12)
+    zcr = librosa.feature.zero_crossing_rate(y)
+    spec_contrast = librosa.feature.spectral_contrast(y=y, sr=sr, n_bands=6, fmin=50)
+    spec_rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)
+    spec_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
+    rms = librosa.feature.rms(y=y)
+    
+    # Aggregate features
+    features = np.hstack([
+        np.mean(mfccs, axis=1),
+        np.mean(chroma, axis=1),
+        np.mean(zcr),
+        np.mean(spec_contrast, axis=1),
+        np.mean(spec_rolloff),
+        np.mean(spec_centroid),
+        np.mean(rms)
+    ])
+    
+    return features
+
+# Prepare data
+def prepare_data():
+    features = []
+    labels = []
+    for category in categories:
+        folder_path = os.path.join(dataset_path, category)
+        for file_name in os.listdir(folder_path):
+            if file_name.endswith('.wav'):
+                file_path = os.path.join(folder_path, file_name)
+                try:
+                    feature = extract_features(file_path)
+                    features.append(feature)
+                    labels.append(category)
+                except Exception as e:
+                    logging.error(f"Error processing file {file_path}: {e}")
+    return np.array(features), np.array(labels)
+
+# Load data
+X, y = prepare_data()
+
+# Encode labels
+label_encoder = LabelEncoder()
+y_encoded = label_encoder.fit_transform(y)
+
+# Handle imbalanced data
+smote = SMOTE(random_state=42)
+X_resampled, y_resampled = smote.fit_resample(X, y_encoded)
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(X_resampled, y_resampled, test_size=0.2, random_state=42)
+
+# Create a pipeline for scaling and training with hyperparameter tuning
+clf = make_pipeline(
+    StandardScaler(),
+    RandomForestClassifier(random_state=42, class_weight='balanced')
+)
+
+param_grid = {
+    'randomforestclassifier__n_estimators': [100, 200, 300],
+    'randomforestclassifier__max_depth': [10, 15, 20],
+    'randomforestclassifier__min_samples_split': [2, 5, 10],
+    'randomforestclassifier__min_samples_leaf': [1, 2, 4],
+}
+
+grid_search = GridSearchCV(clf, param_grid, cv=3, n_jobs=-1, verbose=2)
+grid_search.fit(X_train, y_train)
+
+# Use best model
+best_clf = grid_search.best_estimator_
+
+# Predict and evaluate
+y_pred = best_clf.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred, average='weighted')
+cm = confusion_matrix(y_test, y_pred)
+
+print(f'Accuracy: {accuracy * 100:.2f}%')
+print(f'Weighted F1 Score: {f1:.2f}')
+print(classification_report(y_test, y_pred, target_names=categories))
+
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=categories)
+disp.plot(cmap=plt.cm.Blues)
+plt.show()
+
+# Function to predict
+def predict_audio(file_paths):
+    if isinstance(file_paths, str):  # single file
+        file_paths = [file_paths]
+    predictions = {}
+    for file_path in file_paths:
+        feature = extract_features(file_path)
+        feature = feature.reshape(1, -1)  # Reshape for a single sample
+        prediction = best_clf.predict(feature)
+predictions[file_path] = label_encoder.inverse_transform(prediction)[0]
+    return predictions
+
+# User-defined input for file path
+test_files = input("Please enter the path(s) of the audio file(s) you want to predict (comma-separated): ").strip('\"')
+test_files = [fp.strip() for fp in test_files.split(',')]
+predictions = predict_audio(test_files)
+for file, pred in predictions.items():
+    print(f'The reason behind the baby cry in {file} is: {pred}')
